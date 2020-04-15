@@ -1,3 +1,4 @@
+set_global_assignment -name VERILOG_FILE src/joydb9md.v
 set_global_assignment -name VERILOG_FILE src/gaplus_stargen.v
 set_global_assignment -name VERILOG_FILE src/wsg_aux.v
 set_global_assignment -name VERILOG_FILE src/mc6809/mc6809i.v
