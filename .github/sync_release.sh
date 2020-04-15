@@ -3,7 +3,7 @@
 set -euo pipefail
 
 UPSTREAM_REPO="https://github.com/MiSTer-devel/Arcade-Gaplus_MiSTer.git"
-CORE_NAME="Arcade_Gaplus"
+CORE_NAME="Arcade-Gaplus"
 MAIN_BRANCH="master"
 
 echo "Fetching upstream:"
