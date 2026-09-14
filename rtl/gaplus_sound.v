@@ -22,7 +22,6 @@ module GAPLUS_SOUND
 
 	output [7:0] SND,
 	input  SND_ENABLE,
-	input  PAUSE,
 	
 
 	input				ROMCL,
@@ -30,16 +29,6 @@ module GAPLUS_SOUND
 	input	  [7:0]	ROMDT,
 	input				ROMEN
 );
-wire RESET_SND, RESET_24;
-reset_sync rsync_snd(  CPUCLK, RESET, RESET_SND );
-reset_sync rsync_24 ( ~CLK24M, RESET, RESET_24  );
-
-reg [1:0] pause_sync24;
-always @(posedge CLK24M or posedge RESET_24) begin
-  if (RESET_24) pause_sync24 <= 2'b00;
-  else          pause_sync24 <= { pause_sync24[0], PAUSE };
-end
-wire PAUSE24 = pause_sync24[1];
 
 wire			wave_c;
 wire  [7:0] wave_a;
@@ -72,8 +61,8 @@ wire				SNDCPU_IRQ    = VB & ( ~SNDCPU_IRQEN );
 
 wire				SNDCPU_IRQWE  = ( sndirq_cs & SNDCPU_WE );
 
-always @( negedge CPUCLK or posedge RESET_SND ) begin
-	if ( RESET_SND ) begin
+always @( negedge CPUCLK or posedge RESET ) begin
+	if ( RESET ) begin
 		SNDCPU_IRQEN <= 1'b1;
 	end
 	else begin
@@ -108,9 +97,8 @@ DPRAM_2048 sndram (
 
 wire			pcmclk;
 wire [7:0]	pcmdat;
-pcmplayer 	pcmplay( pcmclk, RESET | PAUSE24, pcm_kick, pcmdat, ROMCL,ROMAD,ROMDT,ROMEN );
+pcmplayer   pcmplay( pcmclk, RESET, pcm_kick, pcmdat, ROMCL,ROMAD,ROMDT,ROMEN );
 
-wire [7:0] SND_RAW;
 
 WSG_8CH_AUX wsg (
 	CLK24M,
@@ -119,10 +107,9 @@ WSG_8CH_AUX wsg (
 	wave_c, wave_a, wave_d,
 	pcmclk, pcmdat,
 	SND_ENABLE,
-	SND_RAW
+	SND
 );
 
-assign SND = PAUSE24 ? 8'h00 : SND_RAW;
 
 endmodule
 
