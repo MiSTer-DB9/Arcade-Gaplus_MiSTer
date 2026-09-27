@@ -4,7 +4,6 @@
 //  Original implimentation and port to MiSTer by MiSTer-X 2019
 //============================================================================
 
-
 module emu
 (
 	//Master input clock
@@ -15,7 +14,7 @@ module emu
 	input         RESET,
 
 	//Must be passed to hps_io module
-	inout  [48:0] HPS_BUS,
+	inout  [45:0] HPS_BUS,
 
 	//Base video clock. Usually equals to CLK_SYS.
 	output        CLK_VIDEO,
@@ -43,6 +42,8 @@ module emu
 	input  [11:0] HDMI_WIDTH,
 	input  [11:0] HDMI_HEIGHT,
 	output        HDMI_FREEZE,
+	output        HDMI_BLACKOUT,
+	output        HDMI_BOB_DEINT,
 
 `ifdef MISTER_FB
 	// Use framebuffer in DDRAM
@@ -218,10 +219,10 @@ wire  [15:0] db9_remap_din;
 // [MiSTer-DB9 END]
 // [MiSTer-DB9 BEGIN] - DB9 remap factory default (used until Main_MiSTer streams UIO 0xFD)
 // Derived from CONF_STR J1, same rule as db9_map.cpp; lets the core work on a stock MiSTer binary.
-// DB15:  Fire=A, Start 1P=START, Start 2P=D, Coin=SELECT
-// DB9MD: Fire=B, Start 1P=START, Start 2P=X, Coin=MODE
-wire  [35:0] db9_remap_default_db15  = 36'hFFFFFB7A4;
-wire  [35:0] db9_remap_default_db9md = 36'hFFFFFB7A5;
+// DB15:  Fire=A, Start 1P=START, Start 2P=D, Coin=SELECT, Pause=E
+// DB9MD: Fire=B, Start 1P=START, Start 2P=X, Coin=MODE, Pause=Y
+wire  [35:0] db9_remap_default_db15  = 36'hFFFF8B7A4;
+wire  [35:0] db9_remap_default_db9md = 36'hFFFF8B7A5;
 // [MiSTer-DB9 END]
 joydb joydb (
   .clk             ( CLK_JOY         ),
@@ -271,7 +272,7 @@ assign VIDEO_ARX = (!ar) ? ((status[2] ) ? 8'd4 : 8'd3) : (ar - 1'd1);
 assign VIDEO_ARY = (!ar) ? ((status[2] ) ? 8'd3 : 8'd4) : 12'd0;
 
 
-`include "build_id.v" 
+`include "build_id.v"
 localparam CONF_STR = {
 	"A.GAPLUS;;",
 	"H0OJK,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
@@ -287,17 +288,18 @@ localparam CONF_STR = {
 	"ODF,Bonus Life,M0,M1,M2,M3,M4,M5,M6,M7;",
 	"OG,Round Advance,Off,On;",
 	"OH,Demo Sound,On,Off;",
-	//"OJ,Cabinet,Upright,Cocktail;",
-"-;",
+	"OL,Flip,Off,On;",
+	"-;",
+	"P1,Pause options;",
+	"P1OP,Pause when OSD is open,On,Off;",
+	"-;",
 	"OI,Service Mode,Off,On;",
 "-;",
 	"R0,Reset;",
-	"J1,Fire,Start 1P,Start 2P,Coin;",
+	"J1,Fire,Start 1P,Start 2P,Coin,Pause;",
 	"V,v",`BUILD_DATE
 };
 
-
-////////////////////   CLOCKS   ///////////////////
 
 wire clk_48M;
 wire clk_hdmi = clk_48M;
@@ -310,7 +312,6 @@ pll pll
 	.outclk_0(clk_48M)
 );
 
-///////////////////////////////////////////////////
 
 // [MiSTer-DB9 BEGIN] - widened to 128 bits for joy_type at [127:126] and joy_2p at [125]
 wire [127:0] status;
@@ -378,9 +379,8 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 );
 
 
-
-//wire bCabinet  = status[19];
-wire bCabinet  = 1'b0;	// (upright only)
+wire bFlip    	= status[21];
+wire bCabinet  = 1'b0;
 
 wire m_up2     = joystk2[3];
 wire m_down2   = joystk2[2];
@@ -399,10 +399,10 @@ wire m_trig11  = joystk1[4] | (bCabinet ? 1'b0 : m_trig21);
 
 wire m_coin1   = joystk1[7];
 wire m_coin2   = joystk2[7];
+wire m_pause_btn = joystk1[8] | joystk2[8];
 
 wire no_rotate = status[2] | direct_video;
 
-///////////////////////////////////////////////////
 
 wire hblank, vblank;
 wire ce_vid;
@@ -450,22 +450,52 @@ assign ce_vid = PCLK;
 wire [15:0] AOUT;
 assign AUDIO_L = AOUT;
 assign AUDIO_R = AUDIO_L;
-assign AUDIO_S = 0; // unsigned PCM
+assign AUDIO_S = 0;
 
 
-///////////////////////////////////////////////////
+wire rst_src = RESET | status[0] | buttons[1] | ioctl_download;
 
-wire iRST = RESET | status[0] | buttons[1] | ioctl_download;
+reg [15:0] rst_cnt = 16'hFFFF;
+always @(posedge clk_sys) begin
+	if (rst_src)       rst_cnt <= 16'hFFFF;
+	else if (|rst_cnt) rst_cnt <= rst_cnt - 1'b1;
+end
 
-wire  [1:0] COIA = 2'b00;				// 1coin/1credit
-wire  [1:0] COIB = 2'b00;				// 1coin/1credit
+wire iRST = |rst_cnt;
+
+reg pause_btn_d;
+reg pause_latch;
+reg [19:0] pause_db;
+
+wire pause_btn = m_pause_btn & ~OSD_STATUS;
+
+always @(posedge clk_sys or posedge iRST) begin
+    if(iRST) begin
+        pause_btn_d <= 1'b0;
+        pause_latch <= 1'b0;
+        pause_db    <= 20'd0;
+    end else begin
+        pause_btn_d <= pause_btn;
+
+        if(pause_db != 0)
+            pause_db <= pause_db - 1'b1;
+
+        if((pause_db == 0) && pause_btn && ~pause_btn_d) begin
+            pause_latch <= ~pause_latch;
+            pause_db    <= 20'd480000;
+        end
+    end
+end
+
+wire  [1:0] COIA = 2'b00;
+wire  [1:0] COIB = 2'b00;
 
 wire	[2:0]	DIFF = status[10:8];
 wire  [1:0] LIFE = status[12:11];
-wire  [2:0] EXTD = status[15:13]; 
+wire  [2:0] EXTD = status[15:13];
 wire			ADVN = status[16];
 wire			DEMO = status[17];
-wire        SERV = status[18];		// Service-SW
+wire        SERV = status[18];
 wire			CABI = bCabinet;
 
 wire  [7:0] DSW0 = {LIFE,COIA,DEMO,1'b0,COIB};
@@ -476,17 +506,21 @@ wire  [4:0]	INP0 = { m_trig11, m_left1, m_down1, m_right1, m_up1 };
 wire  [4:0]	INP1 = { m_trig21, m_left2, m_down2, m_right2, m_up2 };
 wire  [2:0] INP2 = { (m_coin1|m_coin2), m_start2, m_start1 };
 
+wire osd_pause  = OSD_STATUS & ~status[25];
+wire pause_req  = osd_pause | pause_latch;
 
 wire  [7:0] oSND;
 
-FPGA_GAPLUS GameCore ( 
+FPGA_GAPLUS GameCore (
 	.RESET(iRST),.MCLK(clk_48M),
 	.PH(HPOS),.PV(VPOS),.PCLK(PCLK),.POUT(POUT),
 	.SOUT(oSND),
+	.FLIP(bFlip),
+	.PAUSE(pause_req),
 
 	.INP0(INP0),.INP1(INP1),.INP2(INP2),
 	.DSW0(DSW0),.DSW1(DSW1),.DSW2(DSW2),
-	
+
 	.ROMCL(clk_sys),.ROMAD(ioctl_addr),.ROMDT(ioctl_dout),.ROMEN(ioctl_wr)
 );
 
@@ -512,28 +546,37 @@ module HVGEN
 reg [8:0] hcnt = 0;
 reg [8:0] vcnt = 0;
 
+reg hblk_i = 1;
+reg vblk_i = 1;
+reg hsyn_i = 1;
+reg vsyn_i = 1;
+
 assign HPOS = hcnt;
 assign VPOS = vcnt;
 
 always @(posedge PCLK) begin
 	case (hcnt)
-		  0: begin HBLK <= 0; hcnt <= hcnt+1; end
-		289: begin HBLK <= 1; hcnt <= hcnt+1; end
-		311: begin HSYN <= 0; hcnt <= hcnt+1; end
-		342: begin HSYN <= 1; hcnt <= 471;    end
+		  0: begin hblk_i <= 0; hcnt <= hcnt+1; end
+		288: begin hblk_i <= 1; hcnt <= hcnt+1; end
+		311: begin hsyn_i <= 0; hcnt <= hcnt+1; end
+		342: begin hsyn_i <= 1; hcnt <= 471;    end
 		511: begin hcnt <= 0;
 			case (vcnt)
-				223: begin VBLK <= 1; vcnt <= vcnt+1; end
-				235: begin VSYN <= 0; vcnt <= vcnt+1; end
-				242: begin VSYN <= 1; vcnt <= 492;	  end
-				511: begin VBLK <= 0; vcnt <= 0;		  end
+				223: begin vblk_i <= 1; vcnt <= vcnt+1; end
+				235: begin vsyn_i <= 0; vcnt <= vcnt+1; end
+				242: begin vsyn_i <= 1; vcnt <= 491;	  end
+				511: begin vblk_i <= 0; vcnt <= 0;		  end
 				default: vcnt <= vcnt+1;
 			endcase
 		end
 		default: hcnt <= hcnt+1;
 	endcase
-	oRGB <= (HBLK|VBLK) ? 12'h0 : iRGB;
+	oRGB <= (hblk_i|vblk_i) ? 12'h0 : iRGB;
+
+	HBLK <= hblk_i;
+	VBLK <= vblk_i;
+	HSYN <= hsyn_i;
+	VSYN <= vsyn_i;
 end
 
 endmodule
-
